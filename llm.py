@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from config import MODEL_NAME, OLLAMA_BASE_URL, TEMPERATURE, TOP_P, NUM_CTX
+from config import MODEL_NAME, OLLAMA_BASE_URL, TEMPERATURE, TOP_P, NUM_CTX,ALLOW_THINKING
 
 
 def call_llm(
@@ -67,6 +67,7 @@ def call_llm(
         "model": model,
         "messages": filtered_messages,
         "stream": False,
+        "think" : ALLOW_THINKING,
         "options": {
             "temperature": TEMPERATURE,
             "top_p": TOP_P,

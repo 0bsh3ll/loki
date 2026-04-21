@@ -30,7 +30,7 @@ from config import (
 from system_prompt import get_full_system_prompt
 from llm import call_llm, check_ollama_connection
 from tool_registry import execute_tool
-from tool_parser import extract_tool_invocations, strip_tool_lines
+from tool_parser import extract_tool_invocations, strip_tool_lines,strip_think_tags
 from spinner import Spinner
 
 # Trigger auto-discovery of all tools
