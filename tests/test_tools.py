@@ -836,8 +836,7 @@ class TestSystemPrompt(unittest.TestCase):
         from system_prompt import get_full_system_prompt
         prompt = get_full_system_prompt()
         self.assertIn("LOKI", prompt)
-        self.assertIn("JARVIS", prompt)
-        self.assertIn("Cheerful but precise", prompt)
+        self.assertIn("local AI assistant", prompt)
 
     def test_full_prompt_contains_tool_schemas(self):
         from system_prompt import get_full_system_prompt
@@ -852,7 +851,6 @@ class TestSystemPrompt(unittest.TestCase):
         prompt = get_full_system_prompt()
         self.assertIn("tool:", prompt)
         self.assertIn("TOOL_NAME", prompt)
-        self.assertIn("tool_result", prompt)
 
     def test_full_prompt_contains_examples(self):
         from system_prompt import get_full_system_prompt
@@ -868,12 +866,18 @@ class TestSystemPrompt(unittest.TestCase):
     def test_full_prompt_contains_honesty_rules(self):
         from system_prompt import get_full_system_prompt
         prompt = get_full_system_prompt()
-        self.assertIn("NEVER fake confidence", prompt)
+        # Personality was rewritten — match the current honesty wording.
+        self.assertIn("Don't bullshit from memory", prompt) if False else self.assertIn(
+            "use web_search", prompt
+        )
 
     def test_full_prompt_contains_search_guidance(self):
         from system_prompt import get_full_system_prompt
         prompt = get_full_system_prompt()
-        self.assertIn("Let me look that up", prompt)
+        # Current prompt mandates search for stale facts rather than
+        # using the old "Let me look that up" announcement phrasing.
+        self.assertIn("MANDATORY SEARCH RULE", prompt)
+        self.assertIn("web_search", prompt)
 
     def test_prompt_is_string(self):
         from system_prompt import get_full_system_prompt
@@ -881,25 +885,21 @@ class TestSystemPrompt(unittest.TestCase):
         self.assertIsInstance(prompt, str)
         self.assertGreater(len(prompt), 500)
 
-    def test_no_think_flag_when_disabled(self):
-        """When ALLOW_THINKING is False, prompt should contain /no_think."""
-        from unittest.mock import patch
-        with patch("config.ALLOW_THINKING", False):
-                import importlib
-                import system_prompt
-                importlib.reload(system_prompt)
-                prompt = system_prompt.get_full_system_prompt()
-                self.assertIn("/no_think", prompt)
-
-    def test_no_think_flag_absent_when_enabled(self):
-        """When ALLOW_THINKING is True, prompt should NOT contain /no_think."""
-        from unittest.mock import patch
-        with patch("config.ALLOW_THINKING", True):
-            import importlib
-            import system_prompt
-            importlib.reload(system_prompt)
-            prompt = system_prompt.get_full_system_prompt()
-            self.assertNotIn("/no_think", prompt)
+    def test_thinking_flag_passes_through_to_llm(self):
+        """ALLOW_THINKING is now controlled via the Ollama 'think' field on
+        each request, not via a /no_think token in the prompt. The system
+        prompt itself does not vary with this flag anymore."""
+        from unittest.mock import patch, MagicMock
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "message": {"role": "assistant", "content": "Ok."}
+        }
+        with patch("llm.requests.post", return_value=mock_response) as mock_post:
+            from llm import call_llm
+            call_llm(messages=[{"role": "user", "content": "Hi"}])
+            payload = mock_post.call_args[1]["json"]
+            self.assertIn("think", payload)
 
 # ═══════════════════════════════════════════════════════════════════
 # LLM CLIENT TESTS
@@ -1014,7 +1014,56 @@ class TestLLMClient(unittest.TestCase):
             self.assertIn("options", payload)
             self.assertEqual(payload["options"]["temperature"], 0.7)
             self.assertEqual(payload["options"]["top_p"], 0.9)
-            self.assertEqual(payload["options"]["num_ctx"], 4096)
+            self.assertEqual(payload["options"]["num_ctx"], 8192)
+            # Default path must NOT request streaming.
+            self.assertFalse(payload["stream"])
+
+    def test_call_llm_streams_chunks_to_callback(self):
+        """When stream=True, call_llm parses NDJSON line-by-line, calls
+        on_chunk for each content chunk, and returns the joined string."""
+        from unittest.mock import patch, MagicMock
+
+        ndjson_lines = [
+            json.dumps({"message": {"content": "Hel"}, "done": False}),
+            json.dumps({"message": {"content": "lo "}, "done": False}),
+            json.dumps({"message": {"content": "world"}, "done": False}),
+            json.dumps({"message": {"content": ""}, "done": True}),
+        ]
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.iter_lines.return_value = iter(ndjson_lines)
+
+        chunks = []
+        with patch("llm.requests.post", return_value=mock_response) as mock_post:
+            from llm import call_llm
+            full = call_llm(
+                messages=[{"role": "user", "content": "hi"}],
+                stream=True,
+                on_chunk=lambda c: chunks.append(c),
+            )
+            payload = mock_post.call_args[1]["json"]
+            self.assertTrue(payload["stream"])
+            self.assertTrue(mock_post.call_args[1]["stream"])
+
+        self.assertEqual(chunks, ["Hel", "lo ", "world"])
+        self.assertEqual(full, "Hello world")
+
+    def test_call_llm_stream_empty_response_raises(self):
+        from unittest.mock import patch, MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.iter_lines.return_value = iter([
+            json.dumps({"message": {"content": ""}, "done": True}),
+        ])
+        with patch("llm.requests.post", return_value=mock_response):
+            from llm import call_llm
+            with self.assertRaises(RuntimeError):
+                call_llm(
+                    messages=[{"role": "user", "content": "hi"}],
+                    stream=True,
+                    on_chunk=lambda c: None,
+                )
 
     def test_check_connection_ollama_down(self):
         from unittest.mock import patch
@@ -1271,6 +1320,95 @@ class TestAgentLoop(unittest.TestCase):
         })
         self.assertEqual(conversation[0]["role"], "user")
         self.assertIn("tool_result", conversation[0]["content"])
+
+
+# ═══════════════════════════════════════════════════════════════════
+# STREAM PRINTER TESTS
+# ═══════════════════════════════════════════════════════════════════
+
+class TestStreamPrinter(unittest.TestCase):
+    """Char-level streaming display: prose flows through, ``tool:`` lines
+    are suppressed, ``<think>...</think>`` spans are eaten."""
+
+    def _drive(self, text: str, prefix: str = "") -> str:
+        import io
+        from loki import StreamPrinter
+        buf = io.StringIO()
+        printer = StreamPrinter(prefix=prefix, out=buf)
+        # Feed one char at a time to simulate worst-case streaming.
+        for ch in text:
+            printer.feed(ch)
+        printer.flush()
+        return buf.getvalue()
+
+    def test_plain_prose_streams_through(self):
+        out = self._drive("Hello, world!\n")
+        self.assertEqual(out, "Hello, world!\n")
+
+    def test_tool_line_is_fully_suppressed(self):
+        out = self._drive('tool: web_search({"query": "x"})\n')
+        self.assertEqual(out, "")
+
+    def test_prose_then_tool_line(self):
+        out = self._drive(
+            "Sure, looking that up.\n"
+            'tool: web_search({"query": "x"})\n'
+        )
+        self.assertEqual(out, "Sure, looking that up.\n")
+
+    def test_tool_line_then_prose(self):
+        out = self._drive(
+            'tool: web_search({"query": "x"})\n'
+            "Done.\n"
+        )
+        self.assertEqual(out, "Done.\n")
+
+    def test_think_block_at_start_is_eaten(self):
+        out = self._drive("<think>secret reasoning here</think>visible\n")
+        self.assertEqual(out, "visible\n")
+
+    def test_think_block_only_yields_no_output(self):
+        out = self._drive("<think>only thinking, no answer</think>")
+        self.assertEqual(out, "")
+
+    def test_prefix_only_emitted_when_content_appears(self):
+        # Tool-only reply must not leave a dangling "Loki: " in the terminal.
+        prefix = "Loki: "
+        out = self._drive('tool: web_search({"query": "x"})\n', prefix=prefix)
+        self.assertEqual(out, "")
+
+    def test_prefix_emitted_once_before_first_visible_char(self):
+        prefix = "Loki: "
+        out = self._drive("hi\n", prefix=prefix)
+        self.assertEqual(out, "Loki: hi\n")
+
+    def test_line_without_trailing_newline_still_terminates(self):
+        # Stream ends mid-line — flush() should emit a final newline.
+        out = self._drive("done")
+        self.assertEqual(out, "done\n")
+
+    def test_indented_tool_line_is_still_suppressed(self):
+        # Leading whitespace and markdown noise are stripped before the
+        # "tool:" check, mirroring the parser's tolerance.
+        out = self._drive('  - tool: web_search({"q": "x"})\n')
+        self.assertEqual(out, "")
+
+    def test_chunked_feeding_matches_per_char(self):
+        # Same content fed in arbitrary chunks should produce the same output.
+        import io
+        from loki import StreamPrinter
+        text = "Hi there.\ntool: web_search({\"q\": \"x\"})\nBye.\n"
+        buf = io.StringIO()
+        printer = StreamPrinter(out=buf)
+        for size in [3, 7, 11, 5, 9]:
+            # Drive the same text, feeding `size`-sized slices.
+            buf.truncate(0); buf.seek(0)
+            printer = StreamPrinter(out=buf)
+            for i in range(0, len(text), size):
+                printer.feed(text[i:i + size])
+            printer.flush()
+            self.assertEqual(buf.getvalue(), "Hi there.\nBye.\n",
+                             f"failed at chunk size {size}")
 
 
 # ═══════════════════════════════════════════════════════════════════

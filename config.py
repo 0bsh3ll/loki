@@ -11,7 +11,7 @@ MODEL_NAME = "loki"
 OLLAMA_BASE_URL = "http://localhost:11434"
 TEMPERATURE = 0.7
 TOP_P = 0.9
-NUM_CTX = 4096
+NUM_CTX = 8192
 
 # ─── Terminal Colors ───────────────────────────────────────────────
 COLOR_USER = "\033[94m"       # Blue

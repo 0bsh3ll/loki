@@ -11,7 +11,7 @@ Requires: Ollama running locally with the 'loki' model created.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import requests
 
@@ -23,6 +23,7 @@ def call_llm(
     system_prompt: Optional[str] = None,
     model: Optional[str] = None,
     stream: bool = False,
+    on_chunk: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
     Sends a conversation to the Ollama API and returns the
@@ -66,7 +67,7 @@ def call_llm(
     payload: Dict[str, Any] = {
         "model": model,
         "messages": filtered_messages,
-        "stream": False,
+        "stream": bool(stream),
         "think" : ALLOW_THINKING,
         "options": {
             "temperature": TEMPERATURE,
@@ -80,7 +81,9 @@ def call_llm(
 
     # ── Make the request ───────────────────────────────────────
     try:
-        response = requests.post(url, json=payload, timeout=1000)
+        response = requests.post(
+            url, json=payload, timeout=1000, stream=bool(stream)
+        )
     except requests.ConnectionError:
         raise ConnectionError(
             f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. "
@@ -92,12 +95,40 @@ def call_llm(
             f"The model might be loading or the query too complex."
         )
 
-    # ── Parse the response ─────────────────────────────────────
     if response.status_code != 200:
         raise RuntimeError(
             f"Ollama API error {response.status_code}: {response.text}"
         )
 
+    # ── Streaming path ─────────────────────────────────────────
+    # Ollama emits NDJSON: one JSON object per line with the shape
+    # {"message": {"content": "..."}, "done": false} until "done" is true.
+    if stream:
+        buf: List[str] = []
+        try:
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                try:
+                    data = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                chunk = data.get("message", {}).get("content", "")
+                if chunk:
+                    buf.append(chunk)
+                    if on_chunk is not None:
+                        on_chunk(chunk)
+                if data.get("done"):
+                    break
+        finally:
+            response.close()
+
+        content = "".join(buf)
+        if not content:
+            raise RuntimeError("Ollama returned an empty stream.")
+        return content
+
+    # ── Non-streaming path ─────────────────────────────────────
     try:
         data = response.json()
     except json.JSONDecodeError:

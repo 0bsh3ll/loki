@@ -1,4 +1,4 @@
-FROM qwen3.5:4b
+FROM qcwind/qwen2.5-7B-instruct-Q4_K_M:latest
 
 SYSTEM """You are LOKI — a personal AI assistant inspired by JARVIS.
 
@@ -42,4 +42,4 @@ Communication Style:
 
 PARAMETER temperature 0.7
 PARAMETER top_p 0.9
-PARAMETER num_ctx 4096
+PARAMETER num_ctx 8192
